@@ -1,0 +1,39 @@
+{
+    "devices": [
+        {
+            "id": "70:ac:08:ff:fe:7e:0b:xx",
+            "name": "Prise chambre #1",
+            "type": "on_off"
+        },
+        {
+            "id": "34:25:b4:ff:fe:bd:7c:yy",
+            "name": "Prise salon #1",
+            "type": "on_off"
+        },
+        {
+            "id": "f4:b3:b1:ff:fe:9b:26:zz",
+            "name": "Lumière bureau",
+            "type": "on_off"
+        }
+    ],
+    "rules": [
+        {
+            "enabled": true,
+            "name": "Allumage quotidien prise chambre",
+            "timestamp": "2025-09-06T19:30:00Z",
+            "repeat": 86400000000000,
+            "newState": {
+                "70:ac:08:ff:fe:7e:0b:xx": 1
+            }
+        },
+        {
+            "enabled": true,
+            "name": "Extinction quotidienne prise chambre",
+            "timestamp": "2025-09-07T03:30:00Z",
+            "repeat": 86400000000000,
+            "newState": {
+                "70:ac:08:ff:fe:7e:0b:xx": 0
+            }
+        }
+    ]
+}

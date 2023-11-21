@@ -1,0 +1,36 @@
+syntax = "proto3";
+option go_package = "git.ekin.gr/zbGateway/proto";
+
+package zbCtrl;
+
+service ZBCtrl {
+    rpc GetState (GetStateRequest) returns (GetStateResponse) {}
+    rpc SetState (SetStateRequest) returns (SetStateResponse) {}
+}
+
+message GetStateRequest {
+    // key: API key string to authenticate the request
+    string key = 1;
+}
+
+message GetStateResponse {
+    // state: System state, as a json-encoded string
+    // dictionnary of key value pairs:
+    //   key: object id, as an EUI64 string (eg. "00:12:4b:00:24:cb:3e:xx")
+    //   state: boolean state true = on, false = off
+    string state = 1;
+}
+
+message SetStateRequest {
+    // key: API key string to authenticate the request
+    string key = 1;
+    // state: Requested new system state, as a json-encoded string
+    // same format as GetStateResponse
+    // Omitted objects (keys) or objects with same state as currently will be skipped.
+    string state = 2;
+}
+
+message SetStateResponse {
+    // success: success of the set operation, as a boolean
+    bool success = 1;
+}

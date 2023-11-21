@@ -1,0 +1,268 @@
+#! /bin/bash
+# deploy-gway
+
+# Manual steps for first installation:
+# - add entry to `home` nginx server configuration
+# - add entry to `authConfig.json` to enable authentication in wwwhome
+# - check existence of `zbctrl.my.example.com` (or addr in the init scripts) in hosts
+
+_usage_="USAGE: $ ./deploy INSTALL|UPDATE|UPDATE-FRONT DEV|PROD"
+
+# Check parameters
+if [ "$1" != "INSTALL" ] && [ "$1" != "UPDATE" ] && [ "$1" != "UPDATE-FRONT" ]; then
+    echo "$_usage_"
+    exit 1
+fi
+if [ "$2" != "DEV" ] && [ "$2" != "PROD" ]; then
+    echo "$_usage_"
+    exit 1
+fi
+
+set -o errexit
+set -o nounset
+
+# Check that SSH-AGENT is running
+# Otherwise running the script would be painful
+ssh-add -l &>/dev/null && rc=$? || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "You should run this script with a valid ssh-add session."
+    exit 1
+fi
+
+serviceName=
+# Setting parameters depending on mode
+if [ "$2" == "DEV" ]; then
+    mode=DEV
+    srvHost=
+    srvHostPort=
+    srvHostUser=
+elif [ "$2" == "PROD" ]; then
+    mode=PROD
+    srvHost=
+    srvHostPort=
+    srvHostUser=
+fi
+
+# Local directories (makefile)
+#   dist/zbGway/zbGateway_amd64
+#   dist/zbGway/zbGateway_arm64
+#   dist/zbGway/zbGateway_armv6
+#   dist/zbGway/gway-config.json
+#   dist/zbGway/gway-init_systemd_DEV.conf
+#   dist/zbGway/gway-init_systemd_PROD.conf
+#   dist/zbGway/gway-init_upstart_DEV.conf
+#   dist/zbGway/gway-init_upstart_PROD.conf
+#   dist/zbGway/rpcFullchain_DEV.pem
+#   dist/zbGway/rpcFullchain_PROD.pem
+#   dist/zbGway/www/index.html
+locDist="dist/zbGway"
+# Server temporary distribution
+srvDist="/tmp/zbGway/dist"
+# Server target directories
+#   WWWHOME/zbGateway/zbGateway
+#   WWWHOME/zbGateway/config.json
+#   WWWHOME/zbGateway/init.conf
+#   WWWHOME/zbGateway/rpcFullchain.pem
+#   WWWHOME/zbGateway/www/index.html
+#   WWWHOME/www/zigbee/ -> WWWHOME/zbGateway/www/
+srvAppRoot="/home/$srvHostUser/apps/home/zbGateway"
+srvWwwRoot="/home/$srvHostUser/apps/home/www/zigbee"
+
+# Checking existence of selected needed files
+[ -f "$locDist/zbGateway_amd64" ]
+[ -f "$locDist/zbGateway_arm64" ]
+[ -f "$locDist/zbGateway_armv6" ]
+[ -f "$locDist/gway-config.json" ]
+[ -f "$locDist/gway-init_systemd_DEV.conf" ]
+[ -f "$locDist/gway-init_systemd_PROD.conf" ]
+[ -f "$locDist/gway-init_upstart_DEV.conf" ]
+[ -f "$locDist/gway-init_upstart_PROD.conf" ]
+[ -f "$locDist/rpcFullchain_DEV.pem" ]
+[ -f "$locDist/rpcFullchain_PROD.pem" ]
+[ -f "$locDist/www/index.html" ]
+
+
+# Server installation script
+install () {
+    set -o errexit
+    set -o nounset
+
+    # Checking required variables
+    echo "Installing to $mode $(whoami)@$(hostname):$srvAppRoot"
+    echo "${mode:?}" > /dev/null
+    echo "${srvAppRoot:?}" > /dev/null
+    echo "${srvWwwRoot:?}" > /dev/null
+    echo "${srvDist:?}" > /dev/null
+    echo "${serviceName:?}" > /dev/null
+
+    # Stopping server
+    sudo service "$serviceName" stop || true
+
+    # App directory
+    echo "  Deploying to $srvAppRoot/"
+    mkdir -p "$srvAppRoot/"
+    mkdir -p "$srvAppRoot/www/"
+
+    # Binary deployment
+    if uname -a | grep -q "x86_64"; then
+        arch="amd64"
+    elif uname -a | grep -q "aarch64"; then
+        arch="arm64"
+    elif uname -a | grep -q "armv6"; then
+        arch="armv6"
+    else
+        echo "  Unsupported architecture"
+        uname -a
+        exit 1
+    fi
+    echo "  Deploying linux_$arch binary"
+    cp "$srvDist/zbGateway_$arch" "$srvAppRoot/zbGateway"
+
+    # Config deployment
+    echo "  Deploying $mode config"
+    cp "$srvDist/rpcFullchain_$mode.pem" "$srvAppRoot/rpcFullchain.pem"
+    # Using default config.json if not already present
+    if [ -s "$srvAppRoot/config.json" ]; then
+        echo "  WARNING: config.json already prensent, keeping it"
+        echo "           Consider cleaning $srvAppRoot if needed."
+    else
+        echo "  No config.json present. Using default one"
+        cp "$srvDist/gway-config.json" "$srvAppRoot/config.json"
+    fi
+
+    # Web deployment
+    echo "  Deploying static web files"
+    cp -r "$srvDist/www/"* "$srvAppRoot/www/"
+    echo "  Linking web root of $srvWwwRoot"
+    ln -sf "$srvAppRoot/www/" "$srvWwwRoot"
+
+    # Configuring daemon
+    if [ -d "/run/systemd/system" ]; then
+        # Daemon run by systemd
+        echo "  Configuring systemd daemon"
+        cp "$srvDist/gway-init_systemd_$mode.conf" "$srvAppRoot/init.conf"
+        sudo ln -f "$srvAppRoot/init.conf" "/lib/systemd/system/$serviceName.service"
+        sudo systemctl daemon-reload
+        sudo systemctl enable "$serviceName"
+    else
+        # Daemon run by Upstart
+        echo "  Configuring upstart daemon"
+        cp "$srvDist/gway-init_upstart_$mode.conf" "$srvAppRoot/init.conf"
+        sudo ln -f "$srvAppRoot/init.conf" "/etc/init/$serviceName.conf"
+        sudo initctl reload-configuration
+    fi
+
+    # Relaunching service & showing status
+    echo "  Relaunching services"
+    sudo service "$serviceName" start
+    sudo service "$serviceName" status
+
+    # Cleaning-up dist folder
+    echo "  Cleaning-up dist forlder"
+    rm -r "$srvDist"
+
+    echo "  Installation successful :)"
+    exit 0
+}
+
+
+# Server update script
+update () {
+    set -o errexit
+    set -o nounset
+
+    # Checking required variables
+    echo "Updating to $mode $(whoami)@$(hostname):$srvAppRoot"
+    echo "${mode:?}" > /dev/null
+    echo "${srvAppRoot:?}" > /dev/null
+    echo "${srvWwwRoot:?}" > /dev/null
+    echo "${srvDist:?}" > /dev/null
+    echo "${serviceName:?}" > /dev/null
+
+    # Stopping server
+    sudo service "$serviceName" stop || true
+
+    # Binary deployment
+    if uname -a | grep -q "x86_64"; then
+        arch="amd64"
+    elif uname -a | grep -q "aarch64"; then
+        arch="arm64"
+    elif uname -a | grep -q "armv6"; then
+        arch="armv6"
+    else
+        echo "  Unsupported architecture"
+        uname -a
+        exit 1
+    fi
+    echo "  Deploying linux_$arch binary"
+    cp "$srvDist/zbGateway_$arch" "$srvAppRoot/zbGateway"
+
+    # Using default config.json if not already present
+    if [ -s "$srvAppRoot/config.json" ]; then
+        echo "  WARNING: config.json already prensent, keeping it"
+        echo "           Consider cleaning $srvAppRoot if needed."
+    else
+        echo "  No config.json present. Using default one"
+        cp "$srvDist/gway-config.json" "$srvAppRoot/config.json"
+    fi
+
+    # Web deployment
+    echo "  Deploying static web files"
+    cp -r "$srvDist/www/"* "$srvAppRoot/www/"
+    echo "  Linking web root of $srvWwwRoot"
+    ln -sf "$srvAppRoot/www/" "$srvWwwRoot"
+
+    # Relaunching service & showing status
+    echo "  Relaunching services"
+    sudo service "$serviceName" start
+    sudo service "$serviceName" status
+
+    # Cleaning-up dist folder
+    echo "  Cleaning-up dist forlder"
+    rm -r "$srvDist"
+
+    echo "  Update successful :)"
+    exit 0
+}
+
+
+# Server *front-end* update script
+updateFront () {
+    set -o errexit
+    set -o nounset
+
+    # Checking required variables
+    echo "Updating frontend to $mode $(whoami)@$(hostname):$srvAppRoot/www"
+    echo "${mode:?}" > /dev/null
+    echo "${srvAppRoot:?}" > /dev/null
+    echo "${srvWwwRoot:?}" > /dev/null
+    echo "${srvDist:?}" > /dev/null
+
+    # Web deployment
+    echo "  Deploying static web files"
+    cp -r "$srvDist/www/"* "$srvAppRoot/www/"
+    echo "  Linking web root of $srvWwwRoot"
+    ln -sf "$srvAppRoot/www/" "$srvWwwRoot"
+
+    # Cleaning-up dist folder
+    echo "  Cleaning-up dist forlder"
+    rm -r "$srvDist"
+
+    echo "  Frontend update successful :)"
+    exit 0
+}
+
+
+echo "Uploading distribution files to $srvHostUser@$srvHost:$srvHostPort:$srvDist"
+ssh -p $srvHostPort "$srvHostUser@$srvHost" "mkdir -p \"$srvDist/\""
+scp -rpP $srvHostPort "$locDist/"* "$srvHostUser@$srvHost:$srvDist"
+if [ "$1" == "INSTALL" ]; then
+    ssh -tp $srvHostPort "$srvHostUser@$srvHost" "$(typeset -f install); mode=\"$mode\" srvAppRoot=\"$srvAppRoot\" srvWwwRoot=\"$srvWwwRoot\" srvDist=\"$srvDist\" serviceName=\"$serviceName\" install"
+elif [ "$1" == "UPDATE" ]; then
+    ssh -tp $srvHostPort "$srvHostUser@$srvHost" "$(typeset -f update); mode=\"$mode\" srvAppRoot=\"$srvAppRoot\" srvWwwRoot=\"$srvWwwRoot\" srvDist=\"$srvDist\" serviceName=\"$serviceName\" update"
+elif [ "$1" == "UPDATE-FRONT" ]; then
+    ssh -tp $srvHostPort "$srvHostUser@$srvHost" "$(typeset -f updateFront); mode=\"$mode\" srvAppRoot=\"$srvAppRoot\" srvWwwRoot=\"$srvWwwRoot\" srvDist=\"$srvDist\" updateFront"
+fi
+
+echo "Deployment successful :)"
+exit 0

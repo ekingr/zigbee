@@ -1,0 +1,244 @@
+#! /bin/bash
+# deploy-ctrl
+
+# Manual steps for first installation:
+# - install python3.11 (same as dev environment)
+# - find zigbee serial adapter mounting point with `sudo dmesg`
+#   (eg. `/dev/ttyUSB0`) and configure the init scripts accordingly
+# - pair the relevent devices with the zigbee coordinator
+#   and use the associated zigpy.db configuration
+# - check existence of `zbctrl.my.example.com` (or addr in the init scripts) in hosts
+
+_usage_="USAGE: $ ./deploy INSTALL|UPDATE DEV|PROD"
+
+# Check parameters
+if [ "$1" != "INSTALL" ] && [ "$1" != "UPDATE" ]; then
+    echo "$_usage_"
+    exit 1
+fi
+if [ "$2" != "DEV" ] && [ "$2" != "PROD" ]; then
+    echo "$_usage_"
+    exit 1
+fi
+
+set -o errexit
+set -o nounset
+
+# Check that SSH-AGENT is running
+# Otherwise running the script would be painful
+ssh-add -l &>/dev/null && rc=$? || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "You should run this script with a valid ssh-add session."
+    exit 1
+fi
+
+serviceName=
+servicePort=
+# Setting parameters depending on mode
+if [ "$2" == "DEV" ]; then
+    mode=DEV
+    srvHost=
+    srvHostPort=
+    srvHostUser=
+elif [ "$2" == "PROD" ]; then
+    mode=PROD
+    srvHost=
+    srvHostPort=
+    srvHostUser=
+fi
+
+# Local directories (makefile)
+#   dist/zbCtrl/server.py
+#   dist/zbCtrl/controller.py
+#   dist/zbCtrl/zigbee.py
+#   dist/zbCtrl/zbCtrl_pb2_grpc.py
+#   dist/zbCtrl/zbCtrl_pb2.py
+#   dist/zbCtrl/zbCtrl_pb2.pyi
+#   dist/zbCtrl/ctrl-init_systemd_DEV.conf
+#   dist/zbCtrl/ctrl-init_systemd_PROD.conf
+#   dist/zbCtrl/ctrl-init_upstart_DEV.conf
+#   dist/zbCtrl/ctrl-init_upstart_PROD.conf
+#   dist/zbCtrl/rpcKey_DEV.pem
+#   dist/zbCtrl/rpcFullchain_DEV.pem
+#   dist/zbCtrl/rpcKey_PROD.pem
+#   dist/zbCtrl/rpcFullchain_PROD.pem
+#   dist/zbCtrl/zigpy.db
+locDist="dist/zbCtrl"
+# Server temporary distribution
+srvDist="/tmp/zbCtrl/dist"
+# Server target directories
+#   HOME/zbController/env/...
+#   HOME/zbController/server.py
+#   HOME/zbController/controller.py
+#   HOME/zbController/zigbee.py
+#   HOME/zbController/zbCtrl_pb2_grpc.py
+#   HOME/zbController/zbCtrl_pb2.py
+#   HOME/zbController/zbCtrl_pb2.pyi
+#   HOME/zbController/init.conf
+#   HOME/zbController/rpcKey.pem
+#   HOME/zbController/rpcFullchain.pem
+#   HOME/zbController/zigpy.db
+srvAppRoot="/home/$srvHostUser/apps/zbController"
+
+# Checking existence of selected needed files
+[ -f "$locDist/server.py" ]
+[ -f "$locDist/controller.py" ]
+[ -f "$locDist/zigbee.py" ]
+[ -f "$locDist/zbCtrl_pb2_grpc.py" ]
+[ -f "$locDist/zbCtrl_pb2.py" ]
+[ -f "$locDist/zbCtrl_pb2.pyi" ]
+[ -f "$locDist/ctrl-init_systemd_DEV.conf" ]
+[ -f "$locDist/ctrl-init_systemd_PROD.conf" ]
+[ -f "$locDist/ctrl-init_upstart_DEV.conf" ]
+[ -f "$locDist/ctrl-init_upstart_PROD.conf" ]
+[ -f "$locDist/rpcKey_DEV.pem" ]
+[ -f "$locDist/rpcFullchain_DEV.pem" ]
+[ -f "$locDist/rpcKey_PROD.pem" ]
+[ -f "$locDist/rpcFullchain_PROD.pem" ]
+[ -f "$locDist/zigpy.db" ]
+
+
+# Server installation script
+install () {
+    set -o errexit
+    set -o nounset
+
+    # Checking required variables
+    echo "Installing to $mode $(whoami)@$(hostname):$srvAppRoot"
+    echo "${mode:?}" > /dev/null
+    echo "${srvAppRoot:?}" > /dev/null
+    echo "${srvDist:?}" > /dev/null
+    echo "${serviceName:?}" > /dev/null
+    echo "${servicePort:?}" > /dev/null
+    echo "${srvHostUser:?}" > /dev/null
+
+    # Stopping server
+    sudo service "$serviceName" stop || true
+
+    # App directory
+    echo "  Deploying to $srvAppRoot/"
+    mkdir -p "$srvAppRoot/"
+
+    # Scripts deployment
+    echo "  Deploying python scripts"
+    cp "$srvDist/"*.py "$srvAppRoot/"
+    cp "$srvDist/"*.pyi "$srvAppRoot/"
+
+    # Config deployment
+    echo "  Deploying $mode config"
+    cp "$srvDist/rpcFullchain_$mode.pem" "$srvAppRoot/rpcFullchain.pem"
+    cp "$srvDist/rpcKey_$mode.pem" "$srvAppRoot/rpcKey.pem"
+
+    # Using default zigpy.db if not already present
+    if [ -s "$srvAppRoot/zigpy.db" ]; then
+        echo "  WARNING: zigpy.db already prensent, keeping it"
+        echo "           Consider cleaning $srvAppRoot if needed."
+    else
+        echo "  No zigpy.db present. Using default one"
+        cp "$srvDist/zigpy.db" "$srvAppRoot/"
+    fi
+
+    # Setting up Python environment
+    if [ -s "$srvAppRoot/env/bin/python" ]; then
+        echo "  WARNING: Python venv already prensent, keeping it"
+        echo "           Consider cleaning $srvAppRoot if needed."
+    else
+        echo "  Setting up Python environment"
+        python3.11 -m venv "$srvAppRoot/env"
+        "$srvAppRoot/env/bin/python" -m pip install --upgrade pip
+        "$srvAppRoot/env/bin/python" -m pip install zigpy
+        "$srvAppRoot/env/bin/python" -m pip install zigpy-znp
+        "$srvAppRoot/env/bin/python" -m pip install pysqlite3-binary || sudo apt install libsqlite3-dev && "$srvAppRoot/env/bin/python" -m pip install pysqlite3
+        "$srvAppRoot/env/bin/python" -m pip install grpcio
+        "$srvAppRoot/env/bin/python" -m pip install grpcio-tools
+    fi
+
+    # Opening app port on firewall
+    echo "  Opening app port ($servicePort)"
+    sudo ufw allow "$servicePort"
+
+    # Adding user to dialout group to be able to communicate with the serial adapter
+    echo "  Adding app user $srvHostUser to dialout group"
+    sudo usermod -g dialout "$srvHostUser"
+
+    # Configuring daemon
+    if [ -d "/run/systemd/system" ]; then
+        # Daemon run by systemd
+        echo "  Configuring systemd daemon"
+        cp "$srvDist/ctrl-init_systemd_$mode.conf" "$srvAppRoot/init.conf"
+        sudo ln -f "$srvAppRoot/init.conf" "/lib/systemd/system/$serviceName.service"
+        sudo systemctl daemon-reload
+        sudo systemctl enable "$serviceName"
+    else
+        # Daemon run by Upstart
+        echo "  Configuring upstart daemon"
+        cp "$srvDist/ctrl-init_upstart_$mode.conf" "$srvAppRoot/init.conf"
+        sudo ln -f "$srvAppRoot/init.conf" "/etc/init/$serviceName.conf"
+        sudo initctl reload-configuration
+    fi
+
+    # Relaunching service & showing status
+    echo "  Relaunching services"
+    sudo service "$serviceName" start
+    sudo service "$serviceName" status
+
+    # Cleaning-up dist folder
+    echo "  Cleaning-up dist forlder"
+    rm -r "$srvDist"
+
+    echo "  Installation successful :)"
+    exit 0
+}
+
+
+# Server update script
+update () {
+    set -o errexit
+    set -o nounset
+
+    # Checking required variables
+    echo "Updating to $mode $(whoami)@$(hostname):$srvAppRoot"
+    echo "${mode:?}" > /dev/null
+    echo "${srvAppRoot:?}" > /dev/null
+    echo "${srvDist:?}" > /dev/null
+    echo "${serviceName:?}" > /dev/null
+
+    # Stopping server
+    sudo service "$serviceName" stop || true
+
+    # Scripts deployment
+    echo "  Deploying python scripts"
+    cp "$srvDist/"*.py "$srvAppRoot/"
+    cp "$srvDist/"*.pyi "$srvAppRoot/"
+
+    # Config deployment
+    echo "  Deploying $mode config"
+    cp "$srvDist/rpcFullchain_$mode.pem" "$srvAppRoot/rpcFullchain.pem"
+    cp "$srvDist/rpcKey_$mode.pem" "$srvAppRoot/rpcKey.pem"
+
+    # Relaunching service & showing status
+    echo "  Relaunching services"
+    sudo service "$serviceName" start
+    sudo service "$serviceName" status
+
+    # Cleaning-up dist folder
+    echo "  Cleaning-up dist forlder"
+    rm -r "$srvDist"
+
+    echo "  Update successful :)"
+    exit 0
+}
+
+
+
+echo "Uploading distribution files to $srvHostUser@$srvHost:$srvHostPort:$srvDist"
+ssh -p $srvHostPort "$srvHostUser@$srvHost" "mkdir -p \"$srvDist/\""
+scp -rpP $srvHostPort "$locDist/"* "$srvHostUser@$srvHost:$srvDist"
+if [ "$1" == "INSTALL" ]; then
+    ssh -tp $srvHostPort "$srvHostUser@$srvHost" "$(typeset -f install); mode=\"$mode\" srvAppRoot=\"$srvAppRoot\" srvDist=\"$srvDist\" serviceName=\"$serviceName\" servicePort=\"$servicePort\" srvHostUser=\"$srvHostUser\" install"
+elif [ "$1" == "UPDATE" ]; then
+    ssh -tp $srvHostPort "$srvHostUser@$srvHost" "$(typeset -f update); mode=\"$mode\" srvAppRoot=\"$srvAppRoot\" srvDist=\"$srvDist\" serviceName=\"$serviceName\" update"
+fi
+
+echo "Deployment successful :)"
+exit 0
